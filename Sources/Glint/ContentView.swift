@@ -37,7 +37,7 @@ struct ContentView: View {
         .frame(width: 600, height: 450)
         .background(VisualEffectView(material: .hudWindow, blendingMode: .withinWindow).ignoresSafeArea())
         .onAppear { isSearchFocused = true }
-        .background(Button("") { NSApp.hide(nil) }.keyboardShortcut(.escape, modifiers: []).opacity(0))
+        .onExitCommand { NSApp.hide(nil) }
     }
     
     private var searchHeader: some View {

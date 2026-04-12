@@ -25,8 +25,8 @@ struct SettingsView: View {
             }
             .frame(width: 440, height: 440)
             .background(WindowAccessor { window in
-                // Elevate settings window level so it stays on top of the main floating app
-                window.level = .floating
+                // Elevate settings window level to match the main app
+                window.level = .statusBar
                 window.isMovableByWindowBackground = true
                 window.makeKeyAndOrderFront(nil)
             })
@@ -205,7 +205,7 @@ struct SettingsView: View {
                         }
                         .labelsHidden()
                         .frame(width: 100)
-                        .onChange(of: cleanupPeriod) { _ in
+                        .onChange(of: cleanupPeriod) {
                             GlintMonitor.shared.cleanupHistory()
                         }
                     }
@@ -368,30 +368,51 @@ struct ShortcutManager: NSViewRepresentable {
     @Binding var modifiers: Int
     @Binding var shortcutText: String
     
+    class Coordinator: NSObject {
+        var parent: ShortcutManager
+        init(_ parent: ShortcutManager) { self.parent = parent }
+        
+        func handleEvent(_ event: NSEvent) {
+            guard parent.isRecording else { return }
+            
+            let newModifiers = event.modifierFlags.intersection([.control, .option, .shift, .command])
+            // Allow single keys like Space, Return, Tab, or any key with modifiers
+            if !newModifiers.isEmpty || event.keyCode == 49 || event.keyCode == 36 || event.keyCode == 48 {
+                parent.keyCode = Int(event.keyCode)
+                parent.modifiers = Int(parent.translateModifiers(event.modifierFlags))
+                
+                // Capture display text
+                if event.keyCode == 49 { parent.shortcutText = "Space" }
+                else if event.keyCode == 36 { parent.shortcutText = "Return" }
+                else if event.keyCode == 48 { parent.shortcutText = "Tab" }
+                else { parent.shortcutText = event.charactersIgnoringModifiers?.uppercased() ?? "???" }
+                
+                parent.isRecording = false
+                NotificationCenter.default.post(name: NSNotification.Name("HotKeyChanged"), object: nil)
+            }
+        }
+    }
+    
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+    
     func makeNSView(context: Context) -> NSView {
         let view = ShortcutNSView()
         view.onEvent = { event in
-            if isRecording {
-                let newModifiers = event.modifierFlags.intersection([.control, .option, .shift, .command])
-                if !newModifiers.isEmpty || event.keyCode == 49 || event.keyCode == 36 {
-                    self.keyCode = Int(event.keyCode)
-                    self.modifiers = Int(translateModifiers(event.modifierFlags))
-                    
-                    // Capture display text
-                    if event.keyCode == 49 { self.shortcutText = "Space" }
-                    else if event.keyCode == 36 { self.shortcutText = "Return" }
-                    else if event.keyCode == 48 { self.shortcutText = "Tab" }
-                    else { self.shortcutText = event.charactersIgnoringModifiers?.uppercased() ?? "???" }
-                    
-                    self.isRecording = false
-                    NotificationCenter.default.post(name: NSNotification.Name("HotKeyChanged"), object: nil)
-                }
-            }
+            context.coordinator.handleEvent(event)
         }
         return view
     }
     
-    func updateNSView(_ nsView: NSView, context: Context) {}
+    func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.parent = self
+        if isRecording {
+            DispatchQueue.main.async {
+                if nsView.window?.firstResponder != nsView {
+                    nsView.window?.makeFirstResponder(nsView)
+                }
+            }
+        }
+    }
     
     private func translateModifiers(_ flags: NSEvent.ModifierFlags) -> UInt32 {
         var carbonModifiers: UInt32 = 0

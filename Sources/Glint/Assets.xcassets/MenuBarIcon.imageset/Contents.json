@@ -1,12 +1,15 @@
 {
   "images" : [
     {
-      "filename" : "app_icon_128x128_2x.png",
+      "filename" : "menubar_icon.png",
       "idiom" : "universal"
     }
   ],
   "info" : {
     "author" : "xcode",
     "version" : 1
+  },
+  "properties" : {
+    "template-rendering-intent" : "template"
   }
 }

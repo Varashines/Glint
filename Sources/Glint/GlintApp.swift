@@ -5,6 +5,31 @@ import SwiftUI
 import UniformTypeIdentifiers
 import Carbon
 
+// MARK: - Utilities
+private func keyCodeToKeyEquivalent(_ keyCode: UInt32) -> String {
+    switch keyCode {
+    case 49: return " "
+    case 36: return "\r"
+    case 48: return "\t"
+    default:
+        if let savedText = UserDefaults.standard.string(forKey: "hotkeyText") {
+            if savedText.count == 1 {
+                return savedText.lowercased()
+            }
+        }
+        return "j"
+    }
+}
+
+private func carbonToNSEventModifiers(_ carbonModifiers: UInt32) -> SwiftUI.EventModifiers {
+    var flags: SwiftUI.EventModifiers = []
+    if carbonModifiers & UInt32(controlKey) != 0 { flags.insert(.control) }
+    if carbonModifiers & UInt32(optionKey) != 0 { flags.insert(.option) }
+    if carbonModifiers & UInt32(shiftKey) != 0 { flags.insert(.shift) }
+    if carbonModifiers & UInt32(cmdKey) != 0 { flags.insert(.command) }
+    return flags
+}
+
 // MARK: - Global HotKey Manager
 class GlobalHotKeyManager {
     static let shared = GlobalHotKeyManager()
@@ -254,10 +279,8 @@ class GlintMonitor: ObservableObject {
                     let existingIdx = self.items.firstIndex { existing in
                         if existing.type != item.type { return false }
                         if item.type == .file {
-                            // For files, compare the actual URLs, not just the filename
                             return existing.fileURLs == item.fileURLs
                         } else {
-                            // For text/urls/images, compare the content/text
                             return existing.text == item.text
                         }
                     }
@@ -292,13 +315,11 @@ class GlintMonitor: ObservableObject {
         let originalUrl = cacheFolder.appendingPathComponent(originalName)
         let thumbUrl = cacheFolder.appendingPathComponent(thumbName)
         
-        // Save Original
         if let tiff = image.tiffRepresentation, let bitmap = NSBitmapImageRep(data: tiff),
            let png = bitmap.representation(using: .png, properties: [:]) {
             try? png.write(to: originalUrl)
         } else { return nil }
         
-        // Save Thumbnail
         let targetSize = NSSize(width: 200, height: 200 * (image.size.height / image.size.width))
         let newImage = NSImage(size: targetSize)
         newImage.lockFocus()
@@ -329,16 +350,12 @@ class GlintMonitor: ObservableObject {
     }
     
     private func sortItems() {
-        items.sort { (lhs, rhs) -> Bool in
-            if lhs.isPinned != rhs.isPinned {
-                return lhs.isPinned && !rhs.isPinned
-            }
-            // Within categories, sort by most recent
+        items.sort { (lhs, rhs) in
+            if lhs.isPinned != rhs.isPinned { return lhs.isPinned }
             return lhs.timestamp > rhs.timestamp
         }
     }
     
-    /// Provides subtle haptic feedback using the macOS Taptic Engine
     private func hapticFeedback() {
         let isEnabled = UserDefaults.standard.object(forKey: "enableHaptics") as? Bool ?? true
         if isEnabled {
@@ -346,7 +363,6 @@ class GlintMonitor: ObservableObject {
         }
     }
     
-    /// Plays a subtle system sound for audio confirmation
     func playSound() {
         let isEnabled = UserDefaults.standard.object(forKey: "enableSounds") as? Bool ?? true
         if isEnabled {
@@ -357,7 +373,6 @@ class GlintMonitor: ObservableObject {
             }
         }
     }
-    
     func select(_ item: ClipboardItem) {
         hapticFeedback()
         let pb = NSPasteboard.general
@@ -367,13 +382,13 @@ class GlintMonitor: ObservableObject {
         else if let thumb = item.thumbnail { pb.writeObjects([thumb]) }
         else { pb.setString(item.text, forType: .string) }
         self.lastChangeCount = pb.changeCount
-        
-        // Delay hide slightly to ensure sound/haptics are felt/heard
+
+        // Standard hide for clipboard managers
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
             NSApp.hide(nil)
         }
     }
-    
+
     func saveData() {
         let itemsToSave = self.items
         let ignoredToSave = self.ignoredApps
@@ -403,67 +418,38 @@ class GlintMonitor: ObservableObject {
 class GlintPanel: NSPanel {
     init(contentRect: NSRect, backing: NSWindow.BackingStoreType, defer flag: Bool) {
         super.init(contentRect: contentRect, styleMask: [.resizable, .fullSizeContentView, .titled, .nonactivatingPanel], backing: backing, defer: flag)
-        self.isFloatingPanel = true; self.level = .floating; self.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]; self.titleVisibility = .hidden; self.titlebarAppearsTransparent = true; self.isMovableByWindowBackground = true; self.hasShadow = true; self.backgroundColor = .clear
+        self.isFloatingPanel = true
+        self.level = .statusBar 
+        self.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
+        self.titleVisibility = .hidden
+        self.titlebarAppearsTransparent = true
+        self.isMovableByWindowBackground = true
+        self.hasShadow = true
+        self.backgroundColor = .clear
     }
     override var canBecomeKey: Bool { true }; override var canBecomeMain: Bool { true }
 }
 
 class AppDelegate: NSObject, NSApplicationDelegate {
-    var window: GlintPanel?; var statusItem: NSStatusItem?
-    
-    private func applyRoundedCorners(to image: NSImage, radius: CGFloat) -> NSImage {
-        let size = image.size
-        let rect = NSRect(origin: .zero, size: size)
-        let roundedImage = NSImage(size: size)
-        
-        roundedImage.lockFocus()
-        let path = NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius)
-        path.addClip()
-        image.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1.0)
-        roundedImage.unlockFocus()
-        
-        return roundedImage
-    }
+    var window: GlintPanel?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
-
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        if let button = statusItem?.button {
-            // Load the newly created image set from the bundle
-            let originalIcon = Bundle.module.image(forResource: "MenuBarIcon")
-                     ?? NSImage(systemSymbolName: "doc.on.clipboard", accessibilityDescription: "Glint")
-
-            if let icon = originalIcon {
-                icon.size = NSSize(width: 18, height: 18)
-                // Apply circular corners (radius = half of size for a circle, or a smaller value for rounded)
-                let finalIcon = applyRoundedCorners(to: icon, radius: 4)
-                finalIcon.isTemplate = false
-                button.image = finalIcon
-            }
-
-            button.action = #selector(showGlint)
-            button.target = self
-        }
-
-        setupMenu()
-
-        // Register Global HotKey
         registerHotKey()
-
-        // Listen for changes
+        
         NotificationCenter.default.addObserver(forName: NSNotification.Name("HotKeyChanged"), object: nil, queue: .main) { [weak self] _ in
             self?.registerHotKey()
-            self?.setupMenu()
         }
 
         window = GlintPanel(contentRect: NSRect(x: 0, y: 0, width: 600, height: 450), backing: .buffered, defer: false)
-        window?.center(); window?.contentView = NSHostingView(rootView: ContentView().environmentObject(GlintMonitor.shared)); showGlint()
+        window?.center()
+        window?.contentView = NSHostingView(rootView: ContentView().environmentObject(GlintMonitor.shared))
+        showGlint()
+        
         NotificationCenter.default.addObserver(forName: NSApplication.didResignActiveNotification, object: nil, queue: .main) { _ in NSApp.hide(nil) }
     }
 
-    private func registerHotKey() {
-        // Delay slightly to ensure UserDefaults have persisted if this is called from a notification
+    func registerHotKey() {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
             let keyCode = UserDefaults.standard.object(forKey: "hotkeyCode") as? UInt32 ?? 49
             let modifiers = UserDefaults.standard.object(forKey: "hotkeyModifiers") as? UInt32 ?? UInt32(optionKey)
@@ -473,59 +459,48 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
     }
+
     func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool {
         return true
     }
 
-    private func setupMenu() {
-        let keyCode = UserDefaults.standard.object(forKey: "hotkeyCode") as? UInt32 ?? 49
-        let modifiers = UserDefaults.standard.object(forKey: "hotkeyModifiers") as? UInt32 ?? UInt32(optionKey)
-
-        let mainMenu = NSMenu(); let appMenu = NSMenu()
-        let showItem = NSMenuItem(title: "Show Glint", action: #selector(showGlint), keyEquivalent: keyCodeToKeyEquivalent(keyCode))
-        showItem.keyEquivalentModifierMask = carbonToNSEventModifiers(modifiers)
-
-        let settingsItem = NSMenuItem(title: "Settings...", action: #selector(showSettings), keyEquivalent: ",")
-        let quitItem = NSMenuItem(title: "Quit Glint", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-        appMenu.addItem(showItem); appMenu.addItem(settingsItem); appMenu.addItem(NSMenuItem.separator()); appMenu.addItem(quitItem)
-        let appMenuItem = NSMenuItem(); appMenuItem.submenu = appMenu; mainMenu.addItem(appMenuItem)
-        NSApp.mainMenu = mainMenu; statusItem?.menu = appMenu
-    }
-
-    private func keyCodeToKeyEquivalent(_ keyCode: UInt32) -> String {
-        switch keyCode {
-        case 49: return " "
-        case 36: return "\r"
-        case 48: return "\t"
-        default:
-            // Use the saved hotkey text if available, or fallback to lowercase for menu bar
-            if let savedText = UserDefaults.standard.string(forKey: "hotkeyText") {
-                if savedText.count == 1 {
-                    return savedText.lowercased()
-                }
-            }
-            return "j" // Absolute fallback
-        }
-    }
-
-    private func carbonToNSEventModifiers(_ carbonModifiers: UInt32) -> NSEvent.ModifierFlags {
-        var flags: NSEvent.ModifierFlags = []
-        if carbonModifiers & UInt32(controlKey) != 0 { flags.insert(.control) }
-        if carbonModifiers & UInt32(optionKey) != 0 { flags.insert(.option) }
-        if carbonModifiers & UInt32(shiftKey) != 0 { flags.insert(.shift) }
-        if carbonModifiers & UInt32(cmdKey) != 0 { flags.insert(.command) }
-        return flags
-    }    
     @objc func showGlint() { 
         NSApp.activate(ignoringOtherApps: true)
         window?.center()
         window?.makeKeyAndOrderFront(nil) 
     }
-    @objc func showSettings() { window?.orderOut(nil); NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil); NSApp.activate(ignoringOtherApps: true) }
 }
 
 @main
 struct GlintApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    var body: some Scene { Settings { SettingsView() } }
+    @AppStorage("hotkeyCode") private var hotkeyCode: Int = 49
+    @AppStorage("hotkeyModifiers") private var hotkeyModifiers: Int = Int(optionKey)
+
+    var body: some Scene {
+        MenuBarExtra {
+            Button("Show Glint") {
+                appDelegate.showGlint()
+            }
+            .keyboardShortcut(KeyEquivalent(Character(keyCodeToKeyEquivalent(UInt32(hotkeyCode)))), modifiers: carbonToNSEventModifiers(UInt32(hotkeyModifiers)))
+            
+            SettingsLink {
+                Text("Settings...")
+            }
+            .keyboardShortcut(",", modifiers: .command)
+            
+            Divider()
+            
+            Button("Quit Glint") {
+                NSApp.terminate(nil)
+            }
+            .keyboardShortcut("q", modifiers: .command)
+        } label: {
+            Image("MenuBarIcon")
+        }
+
+        Settings { 
+            SettingsView() 
+        }
+    }
 }

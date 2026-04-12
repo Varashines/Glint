@@ -5,7 +5,7 @@ let package = Package(
     name: "Glint",
     defaultLocalization: "en",
     platforms: [
-        .macOS(.v13)
+        .macOS(.v14)
     ],
     products: [
         .executable(name: "Glint", targets: ["Glint"])

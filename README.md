@@ -10,7 +10,7 @@
 - **🖼 Visual History:** High-quality thumbnails for images and intuitive icons for files, URLs, and text.
 - **📌 Smart Pinning:** Keep your most-used snippets at the top of your history.
 - **⌨️ Keyboard-Centric:** Full navigation support with global hotkeys (**⌥ + Space**) and quick-copy shortcuts (**⌘1-9**).
-- **🎨 Native Design:** Built with Swift and SwiftUI for a fluid, lightweight experience that respects macOS system themes.
+- **🎨 Native Design:** Built with Swift and SwiftUI for a fluid, lightweight experience that respects macOS system themes (macOS 14+).
 - **🔒 Privacy First:** Intelligent filtering for sensitive data and purely local storage.
 
 ## 🛠 Technical Architecture
@@ -43,8 +43,8 @@ Glint is engineered with a "security-by-design" approach to protect your sensiti
 ## 🏗 Development
 
 ### Prerequisites
-- macOS 13.0 or later
-- Xcode 14.0+ / Swift 5.7+
+- macOS 14.0 or later
+- Xcode 15.0+ / Swift 5.9+
 - [dmgbuild](https://github.com/dmgbuild/dmgbuild) (optional, for local DMG packaging)
 
 ### Building Locally
