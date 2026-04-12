@@ -24,6 +24,12 @@ struct SettingsView: View {
                     .tabItem { Label("Shortcuts", systemImage: "keyboard") }
             }
             .frame(width: 440, height: 440)
+            .background(WindowAccessor { window in
+                // Elevate settings window level so it stays on top of the main floating app
+                window.level = .floating
+                window.isMovableByWindowBackground = true
+                window.makeKeyAndOrderFront(nil)
+            })
             
             if let message = toastMessage {
                 Text(message)
@@ -404,5 +410,29 @@ class ShortcutNSView: NSView {
     
     override func keyDown(with event: NSEvent) {
         onEvent?(event)
+    }
+}
+
+// MARK: - Window Accessor for Settings Elevation
+struct WindowAccessor: NSViewRepresentable {
+    var onWindowCaptured: (NSWindow) -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        let view = WindowHelperView()
+        view.onWindowCaptured = onWindowCaptured
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {}
+}
+
+class WindowHelperView: NSView {
+    var onWindowCaptured: ((NSWindow) -> Void)?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if let window = window {
+            onWindowCaptured?(window)
+        }
     }
 }
