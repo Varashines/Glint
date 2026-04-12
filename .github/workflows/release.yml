@@ -1,0 +1,56 @@
+name: Build and Release DMG
+
+on:
+  push:
+    tags:
+      - 'v*' # Trigger on tags starting with v (e.g., v1.0.0)
+
+jobs:
+  release:
+    name: Build and Release
+    runs-on: macos-latest
+    permissions:
+      contents: write # Needed to create releases
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Fetch all history for tags and notes
+
+      - name: Extract Tag Message
+        id: tag_message
+        run: |
+          # Get the annotation/message of the current tag
+          MESSAGE=$(git tag -l --format='%(contents)' ${{ github.ref_name }})
+          # Escape for GitHub Actions output
+          EOF=$(dd if=/dev/urandom bs=15 count=1 2>/dev/null | base64)
+          echo "body<<$EOF" >> $GITHUB_OUTPUT
+          echo "$MESSAGE" >> $GITHUB_OUTPUT
+          echo "$EOF" >> $GITHUB_OUTPUT
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install Dependencies
+        run: |
+          uv pip install dmgbuild --system
+
+      - name: Run Build and Create DMG
+        run: |
+          swift PackageApp.swift
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Glint.dmg
+          body: ${{ steps.tag_message.outputs.body }}
+          generate_release_notes: true # Merges your message with commit logs
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
