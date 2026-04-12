@@ -123,8 +123,39 @@ try? dmgSettings.write(toFile: settingsFile, atomically: true, encoding: .utf8)
 
 try? fm.removeItem(atPath: dmgName)
 print("🔨 Building DMG with dmgbuild...")
-let dmgbuildPath = fm.fileExists(atPath: "./venv/bin/dmgbuild") ? "./venv/bin/dmgbuild" : "dmgbuild"
-shell(dmgbuildPath, "-s", settingsFile, projectName, dmgName)
+// Check for uvx in PATH or common locations
+func findExecutable(_ name: String) -> String? {
+    let process = Process()
+    process.launchPath = "/usr/bin/which"
+    process.arguments = [name]
+    let pipe = Pipe()
+    process.standardOutput = pipe
+    process.launch()
+    process.waitUntilExit()
+    if process.terminationStatus == 0 {
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    return nil
+}
+
+let uvxPath = findExecutable("uvx")
+let localVenvPath = "./venv/bin/dmgbuild"
+let systemPath = findExecutable("dmgbuild")
+
+if let uvx = uvxPath {
+    print("✨ Using uvx to run dmgbuild...")
+    shell(uvx, "--with", "dmgbuild", "dmgbuild", "-s", settingsFile, projectName, dmgName)
+} else if fm.fileExists(atPath: localVenvPath) {
+    print("📦 Using local venv for dmgbuild...")
+    shell(localVenvPath, "-s", settingsFile, projectName, dmgName)
+} else if let systemDmgbuild = systemPath {
+    print("🌐 Using system dmgbuild...")
+    shell(systemDmgbuild, "-s", settingsFile, projectName, dmgName)
+} else {
+    print("❌ Error: dmgbuild not found. Please install it or 'uv'.")
+    exit(1)
+}
 
 // 10. Cleanup
 try? fm.removeItem(atPath: iconsetPath)
