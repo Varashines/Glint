@@ -13,6 +13,7 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "Glint",
+            exclude: ["Info.plist"],
             resources: [
                 .process("Assets.xcassets")
             ]

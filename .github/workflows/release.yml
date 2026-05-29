@@ -31,7 +31,8 @@ jobs:
 
       - name: Run Build and Create DMG
         run: |
-          swift PackageApp.swift
+          chmod +x build_dmg.sh
+          bash build_dmg.sh
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

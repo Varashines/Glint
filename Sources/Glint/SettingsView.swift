@@ -3,82 +3,54 @@ import ServiceManagement
 import Carbon
 
 struct SettingsView: View {
-    @AppStorage("historyLimit") private var historyLimit = 100
+    @AppStorage("historyLimit") private var historyLimit = 500
     @AppStorage("cleanupPeriod") private var cleanupPeriod = "Forever"
     @AppStorage("enableHaptics") private var enableHaptics = true
     @AppStorage("enableSounds") private var enableSounds = true
+    
+    @AppStorage("hotkeyCode") private var hotkeyCode = 49
+    @AppStorage("hotkeyModifiers") private var hotkeyModifiers = Int(optionKey)
+    @AppStorage("hotkeyText") private var hotkeyText = "Space"
+
+    @AppStorage("pauseHotkeyCode") private var pauseHotkeyCode = 35
+    @AppStorage("pauseHotkeyModifiers") private var pauseHotkeyModifiers = Int(optionKey | cmdKey)
+    @AppStorage("pauseHotkeyText") private var pauseHotkeyText = "P"
+
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
-    @State private var tempLimitString: String = ""
-    @State private var toastMessage: String? = nil
 
     var body: some View {
-        ZStack(alignment: .bottom) {
-            TabView {
-                generalTab
-                    .tabItem { Label("General", systemImage: "gearshape") }
-                
-                ignoredAppsTab
-                    .tabItem { Label("Blocked Apps", systemImage: "nosign") }
-                
-                shortcutsTab
-                    .tabItem { Label("Shortcuts", systemImage: "keyboard") }
-            }
-            .frame(width: 440, height: 440)
-            .background(WindowAccessor { window in
-                // Elevate settings window level to match the main app
-                window.level = .statusBar
-                window.isMovableByWindowBackground = true
-                window.makeKeyAndOrderFront(nil)
-            })
+        TabView {
+            generalTab
+                .tabItem { Label("General", systemImage: "gearshape") }
             
-            if let message = toastMessage {
-                Text(message)
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 8)
-                    .background(Color.accentColor)
-                    .cornerRadius(20)
-                    .shadow(radius: 4)
-                    .padding(.bottom, 20)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-            }
+            ignoredAppsTab
+                .tabItem { Label("Blocked Apps", systemImage: "nosign") }
+            
+            shortcutsTab
+                .tabItem { Label("Shortcuts", systemImage: "keyboard") }
         }
-        .onAppear {
-            tempLimitString = String(historyLimit)
-        }
+        .frame(width: 440, height: 440)
+        .background(WindowAccessor { window in
+            // Elevate settings window level to match the main app
+            window.level = .statusBar
+            window.isMovableByWindowBackground = true
+            window.makeKeyAndOrderFront(nil)
+        })
     }
 
     private func showToast(_ message: String) {
-        withAnimation(.spring()) {
-            toastMessage = message
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
-            withAnimation {
-                if toastMessage == message {
-                    toastMessage = nil
-                }
-            }
-        }
+        NotificationCenter.default.post(name: NSNotification.Name("GlintShowHUD"), object: message)
     }
 
     private func validateLimit() {
-        if let value = Int(tempLimitString) {
-            if value > 500 {
-                historyLimit = 500
-                showToast("Capped at max 500")
-            } else if value < 10 {
-                historyLimit = 10
-                showToast("Adjusted to min 10")
-            } else {
-                historyLimit = value
-            }
-        } else {
-            // If empty or non-numeric, reset to 100
-            historyLimit = 100
-            showToast("Reset to default 100")
+        if historyLimit > 500 {
+            historyLimit = 500
+            showToast("Capped at max 500")
+        } else if historyLimit < 10 {
+            historyLimit = 10
+            showToast("Adjusted to min 10")
         }
-        tempLimitString = String(historyLimit)
+        GlintMonitor.shared.enforceLimit()
     }
 
     @State private var newAppIdentifier: String = ""
@@ -185,12 +157,18 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 16) {
                     settingRow(title: "History Limit", subtitle: "Number of snippets to remember (Max 500).") {
                         HStack(spacing: 8) {
-                            TextField("", text: $tempLimitString)
+                            TextField("", value: $historyLimit, format: .number)
                                 .textFieldStyle(.roundedBorder)
                                 .multilineTextAlignment(.center)
-                                .frame(width: 60)
+                                .frame(width: 50)
                                 .onSubmit {
                                     validateLimit()
+                                }
+                            
+                            Stepper("", value: $historyLimit, in: 10...500, step: 10)
+                                .labelsHidden()
+                                .onChange(of: historyLimit) {
+                                    GlintMonitor.shared.enforceLimit()
                                 }
                         }
                     }
@@ -279,37 +257,32 @@ struct SettingsView: View {
 
     private var shortcutsTab: some View {
         VStack(alignment: .leading, spacing: 20) {
-            Text("Global Shortcut")
+            Text("Global Shortcuts")
                 .font(.headline)
             
-            VStack(alignment: .leading, spacing: 16) {
-                Text("Record a custom global shortcut to show Glint from anywhere.")
-                    .font(.subheadline)
-                    .foregroundColor(.secondary)
-                
-                HStack(spacing: 24) {
-                    ShortcutRecorder()
-                    
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("To change:")
-                            .font(.system(size: 11, weight: .bold))
-                        Text("Click the field and press your new keys.")
-                            .font(.system(size: 11))
-                        Text("Modifier keys (⌘, ⌥, ⇧, ⌃) are required.")
-                            .font(.system(size: 11))
-                    }
-                    .foregroundColor(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+            VStack(alignment: .leading, spacing: 20) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Show Glint")
+                        .font(.system(size: 13, weight: .bold))
+                    ShortcutRecorder(keyCode: $hotkeyCode, modifiers: $hotkeyModifiers, shortcutText: $hotkeyText)
                 }
-                .padding(20)
-                .background(Color.primary.opacity(0.03))
-                .cornerRadius(12)
-                .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.06), lineWidth: 1))
+
+                Divider().opacity(0.3)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Toggle Monitoring (Pause/Resume)")
+                        .font(.system(size: 13, weight: .bold))
+                    ShortcutRecorder(keyCode: $pauseHotkeyCode, modifiers: $pauseHotkeyModifiers, shortcutText: $pauseHotkeyText)
+                }
                 
-                Text("Tip: A combination like Option + Space or Command + Shift + V works best.")
+                Text("Tip: Modifier keys (⌘, ⌥, ⇧, ⌃) are required.")
                     .font(.system(size: 11))
                     .foregroundColor(.secondary.opacity(0.8))
             }
+            .padding(20)
+            .background(Color.primary.opacity(0.03))
+            .cornerRadius(12)
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.06), lineWidth: 1))
             
             Spacer()
         }
@@ -325,9 +298,9 @@ struct SettingsView: View {
 }
 
 struct ShortcutRecorder: View {
-    @AppStorage("hotkeyCode") private var hotkeyCode = 49
-    @AppStorage("hotkeyModifiers") private var hotkeyModifiers = Int(optionKey)
-    @AppStorage("hotkeyText") private var hotkeyText = "Space"
+    @Binding var keyCode: Int
+    @Binding var modifiers: Int
+    @Binding var shortcutText: String
     @State private var isRecording = false
     
     var body: some View {
@@ -346,18 +319,18 @@ struct ShortcutRecorder: View {
             .overlay(RoundedRectangle(cornerRadius: 8).stroke(isRecording ? Color.accentColor : Color.clear, lineWidth: 1))
         }
         .buttonStyle(.plain)
-        .background(ShortcutManager(isRecording: $isRecording, keyCode: $hotkeyCode, modifiers: $hotkeyModifiers, shortcutText: $hotkeyText))
+        .background(ShortcutManager(isRecording: $isRecording, keyCode: $keyCode, modifiers: $modifiers, shortcutText: $shortcutText))
     }
     
     private var currentShortcutText: String {
         var result = ""
-        let mods = UInt32(hotkeyModifiers)
+        let mods = UInt32(modifiers)
         if mods & UInt32(controlKey) != 0 { result += "⌃" }
         if mods & UInt32(optionKey) != 0 { result += "⌥" }
         if mods & UInt32(shiftKey) != 0 { result += "⇧" }
         if mods & UInt32(cmdKey) != 0 { result += "⌘" }
         
-        result += hotkeyText
+        result += shortcutText
         return result
     }
 }
