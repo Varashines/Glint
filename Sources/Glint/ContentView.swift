@@ -228,8 +228,9 @@ struct ContentView: View {
     // list can never stretch — these just flip shared state, instantly, no timers.
     private func openPreview(_ item: ClipboardItem) {
         if monitor.selectedPreviewID == item.id { return }
+        // Do NOT touch keyboardIndex here: that drives the list's scroll-to-selection,
+        // which made clicking the chevron jump/scroll the main list.
         monitor.selectedPreviewID = item.id
-        keyboardIndex = filteredItems.firstIndex(where: { $0.id == item.id })
     }
 
     private func closePreview() {
@@ -1331,6 +1332,7 @@ struct GlintRow: View {
                     }
                 }
                 .buttonStyle(.plain)
+                .focusable(false)
                 .help(item.isPinned ? "Unpin" : "Pin (⌘P)")
             }
 
@@ -1355,6 +1357,7 @@ struct GlintRow: View {
                                         .clipShape(Circle())
                                 }
                                 .buttonStyle(.plain)
+                                .focusable(false)
                                 .help("Open in browser")
                             }
 
@@ -1367,6 +1370,7 @@ struct GlintRow: View {
                                     .clipShape(Circle())
                             }
                             .buttonStyle(.plain)
+                            .focusable(false)
                             .help("Delete")
                             .transition(.opacity.combined(with: .scale))
                         } else if index < 9 {
@@ -1389,6 +1393,7 @@ struct GlintRow: View {
                                 .clipShape(Circle())
                         }
                         .buttonStyle(.plain)
+                        .focusable(false)
                         .help(isSelected ? "Close preview" : "Open preview (→)")
                     }
                 }
