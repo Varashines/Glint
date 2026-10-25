@@ -4,11 +4,26 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build (e.g. 1.3.0)'
+        required: true
+        default: '1.3.0'
+      publish:
+        description: 'Publish a GitHub release (creates the tag if missing)'
+        type: boolean
+        default: true
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   release:
     name: Build and Release
     runs-on: macos-latest
+    timeout-minutes: 30
     permissions:
       contents: write
     steps:
@@ -17,28 +32,63 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Extract Tag Message
+      - name: Resolve version
+        id: version
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="${{ inputs.version }}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Stamp version into Info.plist
+        run: |
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${{ steps.version.outputs.version }}" Sources/Glint/Info.plist
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${{ github.run_number }}" Sources/Glint/Info.plist
+          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" Sources/Glint/Info.plist
+
+      - name: Extract tag message
+        if: startsWith(github.ref, 'refs/tags/')
         id: tag_message
         run: |
-          MESSAGE=$(git tag -l --format='%(contents)' ${{ github.ref_name }})
+          MESSAGE=$(git tag -l --format='%(contents)' "${GITHUB_REF_NAME}")
           EOF=$(dd if=/dev/urandom bs=15 count=1 2>/dev/null | base64)
-          echo "body<<$EOF" >> $GITHUB_OUTPUT
-          echo "$MESSAGE" >> $GITHUB_OUTPUT
-          echo "$EOF" >> $GITHUB_OUTPUT
+          echo "body<<$EOF" >> "$GITHUB_OUTPUT"
+          echo "$MESSAGE" >> "$GITHUB_OUTPUT"
+          echo "$EOF" >> "$GITHUB_OUTPUT"
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
 
-      - name: Run Build and Create DMG
+      - name: Build app and DMG
+        run: swift PackageApp.swift
+
+      - name: Verify artifacts
         run: |
-          swift PackageApp.swift
+          hdiutil verify Glint.dmg
+          codesign --verify --deep --strict "build/Glint.app"
+          cp Glint.dmg "Glint-${{ steps.version.outputs.version }}.dmg"
+          ls -lh "Glint-${{ steps.version.outputs.version }}.dmg"
 
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Glint-${{ steps.version.outputs.version }}
+          path: Glint-${{ steps.version.outputs.version }}.dmg
+          if-no-files-found: error
+          retention-days: 30
 
-      - name: Create GitHub Release
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/') || inputs.publish
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: Glint ${{ steps.version.outputs.version }}
+          target_commitish: ${{ github.sha }}
           files: Glint.dmg
-          body: ${{ steps.tag_message.outputs.body }}
+          body: ${{ steps.tag_message.outputs.body || format('Glint {0}', steps.version.outputs.version) }}
           generate_release_notes: true
           draft: false
           prerelease: false

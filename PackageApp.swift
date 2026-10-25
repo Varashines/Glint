@@ -23,9 +23,20 @@ let fm = FileManager.default
 try? fm.removeItem(atPath: buildDir)
 try? fm.createDirectory(atPath: buildDir, withIntermediateDirectories: true)
 
-// 2. Build Universal Binary
-print("🔨 Building Universal Binary (arm64 + x86_64)...")
-let buildStatus = shell("swift", "build", "-c", "release", "--arch", "arm64", "--arch", "x86_64")
+// 2. Build (universal when Xcode is available, native otherwise)
+let hasXcode = FileManager.default.isExecutableFile(
+    atPath: "/Applications/Xcode.app/Contents/Developer/usr/bin/actool")
+
+if hasXcode {
+    print("🔨 Building Universal Binary (arm64 + x86_64)...")
+} else {
+    print("🔨 Building release binary for this Mac (Command Line Tools only)...")
+}
+
+let buildStatus =
+    hasXcode
+    ? shell("swift", "build", "-c", "release", "--arch", "arm64", "--arch", "x86_64")
+    : shell("swift", "build", "-c", "release")
 guard buildStatus == 0 else { exit(1) }
 
 // 3. Setup .app Structure
@@ -39,7 +50,9 @@ try fm.createDirectory(atPath: macosPath, withIntermediateDirectories: true)
 try fm.createDirectory(atPath: resourcesPath, withIntermediateDirectories: true)
 
 // 4. Copy Binary
-let binarySource = ".build/apple/Products/Release/\(projectName)"
+let releaseProducts =
+    hasXcode ? ".build/apple/Products/Release" : ".build/release"
+let binarySource = "\(releaseProducts)/\(projectName)"
 try fm.copyItem(atPath: binarySource, toPath: "\(macosPath)/\(projectName)")
 shell("chmod", "+x", "\(macosPath)/\(projectName)")
 
@@ -65,7 +78,6 @@ try? fm.copyItem(atPath: sourceLogo, toPath: "\(iconsetPath)/icon_512x512@2x.png
 shell("iconutil", "-c", "icns", iconsetPath, "-o", "\(resourcesPath)/AppIcon.icns")
 
 // 7. Copy Resource Bundle
-let releaseProducts = ".build/apple/Products/Release"
 if let items = try? fm.contentsOfDirectory(atPath: releaseProducts) {
     for item in items where item.hasSuffix(".bundle") {
         let bundlePath = "\(resourcesPath)/\(item)"

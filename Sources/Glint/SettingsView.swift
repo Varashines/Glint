@@ -31,10 +31,12 @@ struct SettingsView: View {
         }
         .frame(width: 440, height: 440)
         .background(WindowAccessor { window in
-            // Elevate settings window level to match the main app
-            window.level = .statusBar
+            // Settings must sit above the Glint popup (which is at .statusBar).
+            // Use one level above statusBar, and hide the popup so it can't cover us.
+            window.level = NSWindow.Level(rawValue: Int(NSWindow.Level.statusBar.rawValue) + 1)
             window.isMovableByWindowBackground = true
             window.makeKeyAndOrderFront(nil)
+            NSApp.windows.filter { $0 is GlintPanel || $0 is GlintPreviewPanel }.forEach { $0.orderOut(nil) }
         })
     }
 

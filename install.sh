@@ -12,8 +12,8 @@ echo "🔨 Compiling release binary..."
 swift build -c release
 
 # 2. Locate built artifacts
-BINARY_PATH=$(find .build -name "$PROJECT_NAME" -type f | grep "release" | head -n 1)
-BUNDLE_PATH=$(find .build -name "${PROJECT_NAME}_${PROJECT_NAME}.bundle" -type d | grep "release" | head -n 1)
+BINARY_PATH=$(find .build -name "$PROJECT_NAME" -type f | grep -i "release" | head -n 1)
+BUNDLE_PATH=$(find .build -name "${PROJECT_NAME}_${PROJECT_NAME}.bundle" -type d | grep -i "release" | head -n 1)
 
 if [ -z "$BINARY_PATH" ]; then
     echo "❌ Error: Could not find compiled binary."
