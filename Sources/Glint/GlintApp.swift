@@ -1004,13 +1004,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         var start = final
-        start.origin.x += 12
+        start.origin.x += 8
         preview.setFrame(start, display: false)
         preview.alphaValue = 0
         preview.orderFront(nil)
         NSAnimationContext.runAnimationGroup(
             { ctx in
-                ctx.duration = 0.22
+                ctx.duration = 0.18
                 ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
                 preview.animator().setFrame(final, display: true)
                 preview.animator().alphaValue = 1
@@ -1027,7 +1027,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let gen = previewGeneration
         NSAnimationContext.runAnimationGroup(
             { ctx in
-                ctx.duration = 0.15
+                ctx.duration = 0.13
                 ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
                 preview.animator().alphaValue = 0
             },

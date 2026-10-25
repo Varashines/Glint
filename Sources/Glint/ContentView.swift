@@ -74,6 +74,14 @@ func typeBadgeColor(for type: ContentType) -> Color {
     }
 }
 
+/// Black or white, whichever stays readable on the user's accent color.
+func onAccentColor() -> Color {
+    let ns = NSColor(Color.accentColor).usingColorSpace(.sRGB) ?? .controlAccentColor
+    let luminance =
+        0.2126 * ns.redComponent + 0.7152 * ns.greenComponent + 0.0722 * ns.blueComponent
+    return luminance > 0.62 ? Color.black.opacity(0.82) : Color.white
+}
+
 /// Single-line, bounded preview for rows (avoids laying out 100KB strings).
 func rowPreviewText(_ text: String) -> String {
     let firstLine = text.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
@@ -109,6 +117,7 @@ func previewMetaText(_ item: ClipboardItem) -> String {
 
 struct ContentView: View {
     @EnvironmentObject var monitor: GlintMonitor
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var searchText: String = ""
     @FocusState private var isSearchFocused: Bool
     @State private var selectedFilter: ContentFilter = .all
@@ -198,8 +207,12 @@ struct ContentView: View {
 
     private func selectFilter(_ filter: ContentFilter) {
         guard selectedFilter != filter else { return }
-        withAnimation(.spring(response: 0.28, dampingFraction: 0.8)) {
+        if reduceMotion {
             selectedFilter = filter
+        } else {
+            withAnimation(.snappy(duration: 0.3, extraBounce: 0.04)) {
+                selectedFilter = filter
+            }
         }
         keyboardIndex = filteredItems.isEmpty ? nil : 0
         scrollResetToken += 1
@@ -315,6 +328,14 @@ struct ContentView: View {
             ZStack {
                 VisualEffectView(material: .popover, blendingMode: .behindWindow)
                 Color(NSColor.windowBackgroundColor).opacity(0.4)
+                // Barely-there accent light so the panel feels lit, not painted.
+                RadialGradient(
+                    colors: [Color.accentColor.opacity(0.09), Color.accentColor.opacity(0)],
+                    center: .topTrailing,
+                    startRadius: 10,
+                    endRadius: 380
+                )
+                .allowsHitTesting(false)
             }
             .ignoresSafeArea()
         )
@@ -436,18 +457,21 @@ struct ContentView: View {
                     keyHintStrip
                 }
             }
-            .padding(.horizontal, 14)
-            .frame(height: 44)
+            .padding(.horizontal, 16)
+            .frame(height: 42)
             .background(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(Color.primary.opacity(isSearchFocused ? 0.07 : 0.04))
+                Capsule(style: .continuous)
+                    .fill(Color.primary.opacity(isSearchFocused ? 0.06 : 0.035))
+                    .shadow(
+                        color: Color.accentColor.opacity(isSearchFocused ? 0.16 : 0),
+                        radius: 10, y: 1)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                Capsule(style: .continuous)
                     .stroke(
-                        Color.accentColor.opacity(isSearchFocused ? 0.45 : 0.08), lineWidth: 1)
+                        Color.accentColor.opacity(isSearchFocused ? 0.32 : 0.06), lineWidth: 1)
             )
-            .animation(.easeOut(duration: 0.15), value: isSearchFocused)
+            .animation(.snappy(duration: 0.22), value: isSearchFocused)
             .padding(.horizontal, 12)
             .padding(.top, 12)
             .padding(.bottom, 10)
@@ -509,11 +533,13 @@ struct ContentView: View {
         let isActive = selectedFilter == filter
         let count = itemCount(for: filter)
         let isHovered = hoveredFilter == filter
+        let accentText = onAccentColor()
 
         return Button(action: { selectFilter(filter) }) {
             HStack(spacing: 5) {
                 Image(systemName: filter.systemImage)
                     .font(.system(size: 10, weight: .bold))
+                    .symbolEffect(.bounce, options: .nonRepeating, value: isActive)
 
                 Text(filter.rawValue)
                     .font(.system(size: 11, weight: .semibold))
@@ -523,40 +549,33 @@ struct ContentView: View {
                 Text("\(count)")
                     .font(.system(size: 9, weight: .bold, design: .monospaced))
                     .monospacedDigit()
-                    .foregroundStyle(isActive ? Color.white.opacity(0.95) : Color.secondary)
+                    .foregroundStyle(isActive ? accentText.opacity(0.9) : Color.secondary)
                     .padding(.horizontal, 5)
                     .padding(.vertical, 1)
                     .background(
                         Capsule().fill(
-                            isActive
-                                ? Color.white.opacity(0.22) : Color.primary.opacity(0.07))
+                            isActive ? accentText.opacity(0.16) : Color.primary.opacity(0.06))
                     )
             }
             .foregroundStyle(
-                isActive ? Color.white : Color.primary.opacity(count == 0 ? 0.45 : 0.85)
+                isActive ? accentText : Color.primary.opacity(count == 0 ? 0.45 : 0.85)
             )
             .padding(.horizontal, 8)
             .frame(maxWidth: .infinity)
             .frame(height: 30)
-            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
             .background(
                 ZStack {
                     if isActive {
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        RoundedRectangle(cornerRadius: 9, style: .continuous)
                             .fill(Color.accentColor)
-                            .shadow(color: Color.accentColor.opacity(0.35), radius: 3, y: 1)
+                            .shadow(color: Color.accentColor.opacity(0.28), radius: 4, y: 1.5)
                             .matchedGeometryEffect(id: "activeFilterPill", in: filterAnimation)
                     } else {
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(Color.primary.opacity(isHovered ? 0.09 : 0.045))
+                        RoundedRectangle(cornerRadius: 9, style: .continuous)
+                            .fill(Color.primary.opacity(isHovered ? 0.085 : 0.04))
                     }
                 }
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(
-                        Color.primary.opacity(isActive ? 0 : (isHovered ? 0.16 : 0.08)),
-                        lineWidth: 1)
             )
         }
         .buttonStyle(.plain)
@@ -654,19 +673,12 @@ struct ContentView: View {
             .foregroundStyle(selectedApps.isEmpty ? Color.secondary : Color.accentColor)
             .frame(width: 38, height: 30)
             .background(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
                     .fill(
                         selectedApps.isEmpty
-                            ? Color.primary.opacity(0.045) : Color.accentColor.opacity(0.16))
+                            ? Color.primary.opacity(0.04) : Color.accentColor.opacity(0.14))
             )
-            .overlay(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(
-                        selectedApps.isEmpty
-                            ? Color.primary.opacity(0.08) : Color.accentColor.opacity(0.45),
-                        lineWidth: 1)
-            )
-            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
         }
         .buttonStyle(.plain)
         .help(
@@ -1170,8 +1182,6 @@ struct PreviewHostView: View {
             Image(systemName: systemName)
                 .font(.system(size: 11, weight: .bold))
                 .frame(width: 24, height: 24)
-                .background(Color.primary.opacity(0.04))
-                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
