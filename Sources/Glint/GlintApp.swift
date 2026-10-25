@@ -2,6 +2,7 @@ import AppKit
 import Carbon
 import Combine
 import CoreGraphics
+import CryptoKit
 import Foundation
 import ImageIO
 import SwiftUI
@@ -11,8 +12,12 @@ import UniformTypeIdentifiers
 
 /// Cap stored text to avoid blowing up memory / history.json with huge logs.
 private let maxStoredTextLength = 100_000
-/// Max thumbnail pixel width (2x for Retina, down from full-res originals).
-private let thumbnailMaxPixelWidth = 400
+/// Thumbnails are bounded by pixel area (≈400×400) so very tall/wide captures
+/// can't create multi-megapixel thumbnails.
+private let thumbnailMaxPixels = 400 * 400
+/// Never delete cache files newer than this, so in-flight captures can't be
+/// mistaken for orphans by a concurrent prune.
+private let pruneMinimumAge: TimeInterval = 10 * 60
 
 // MARK: - Shared caches & formatters (avoid per-row I/O)
 
@@ -38,13 +43,17 @@ private func pngData(from cgImage: CGImage) -> Data? {
     return rep.representation(using: .png, properties: [:])
 }
 
-private func scaledThumbnailCG(from cgImage: CGImage, maxWidth: Int) -> CGImage? {
+private func sha256Hex(_ data: Data) -> String {
+    SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+}
+
+private func scaledThumbnailCG(from cgImage: CGImage, maxPixels: Int) -> CGImage? {
     let origW = cgImage.width
     let origH = cgImage.height
     guard origW > 0, origH > 0 else { return nil }
-    if origW <= maxWidth { return cgImage }
-    let scale = Double(maxWidth) / Double(origW)
-    let newW = maxWidth
+    if origW * origH <= maxPixels { return cgImage }
+    let scale = sqrt(Double(maxPixels) / Double(origW * origH))
+    let newW = max(1, Int(Double(origW) * scale))
     let newH = max(1, Int(Double(origH) * scale))
     guard let ctx = CGContext(
         data: nil, width: newW, height: newH,
@@ -171,6 +180,10 @@ struct ClipboardItem: Identifiable, Equatable, Codable {
     let fileURLs: [URL]?
     let imageFileName: String?
     let originalImageName: String?
+    /// SHA-256 of the original image bytes. Images are deduped by content, not by
+    /// their "Image (WxH)" label, so different captures with identical dimensions
+    /// are no longer treated as the same clip.
+    var contentHash: String? = nil
 
     var relativeTime: String {
         SharedCaches.relativeFormatter.localizedString(for: timestamp, relativeTo: Date())
@@ -214,7 +227,7 @@ struct ClipboardItem: Identifiable, Equatable, Codable {
 
     enum CodingKeys: String, CodingKey {
         case id, text, type, timestamp, sourceApp, bundleID, isPinned, fileURLs, imageFileName,
-            originalImageName
+            originalImageName, contentHash
     }
 }
 
@@ -291,15 +304,21 @@ class GlintMonitor: ObservableObject {
                     !$0.isPinned && now.timeIntervalSince($0.timestamp) > seconds
                 }
             }
-            for item in expired { self.deleteBackingFiles(for: item) }
-            self.pruneOrphanFiles()
-            self.saveData()
+            // Persist first, then remove the backing files.
+            if self.saveData(waitForCompletion: true) {
+                for item in expired { self.deleteBackingFiles(for: item) }
+                self.pruneOrphanFiles()
+            }
+            self.clearPreviewIfMissing()
         }
     }
 
     private var lastChangeCount = NSPasteboard.general.changeCount
     private let monitorQueue = DispatchQueue(label: "com.glint.monitor", qos: .utility)
     private let saveQueue = DispatchQueue(label: "com.glint.save", qos: .background)
+    /// Serializes every cache read/write/delete/prune. Captures that finish writing
+    /// here are visible to later operations on this queue in order.
+    private let cacheQueue = DispatchQueue(label: "com.glint.cache", qos: .utility)
     private var pollTimer: DispatchSourceTimer?
     private var cleanupTimer: DispatchSourceTimer?
 
@@ -375,7 +394,11 @@ class GlintMonitor: ObservableObject {
         }
         startMonitoring()
         enforceLimit()
+        // Items are loaded synchronously above; these snapshot the referenced names
+        // on main and only then touch the cache on `cacheQueue`.
         pruneOrphanFiles()
+        repairThumbnails()
+        verifyReferencedFiles()
     }
 
     deinit {
@@ -384,25 +407,30 @@ class GlintMonitor: ObservableObject {
     }
 
     func enforceLimit() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in self?.enforceLimit() }
+            return
+        }
         let limit = UserDefaults.standard.integer(forKey: "historyLimit")
         let actualLimit = limit > 0 ? limit : 500
 
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            // Single-pass partition: pinned always kept, unpinned truncated to limit.
-            let pinned = self.items.filter { $0.isPinned }
-            var unpinned = self.items.filter { !$0.isPinned }
-            guard unpinned.count > actualLimit else { return }
-            // items are kept newest-first; drop the tail.
-            let dropped = Array(unpinned.suffix(unpinned.count - actualLimit))
-            unpinned = Array(unpinned.prefix(actualLimit))
-            withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
-                self.items = pinned + unpinned
-                self.sortItems()
-            }
-            for item in dropped { self.deleteBackingFiles(for: item) }
-            self.saveData()
+        // Single-pass partition: pinned always kept, unpinned truncated to limit.
+        let pinned = items.filter { $0.isPinned }
+        var unpinned = items.filter { !$0.isPinned }
+        guard unpinned.count > actualLimit else { return }
+        // items are kept newest-first; drop the tail.
+        let dropped = Array(unpinned.suffix(unpinned.count - actualLimit))
+        unpinned = Array(unpinned.prefix(actualLimit))
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+            items = pinned + unpinned
+            sortItems()
         }
+        // Persist the new history *before* removing files, so a crash mid-way can
+        // never leave dangling references pointing at deleted images.
+        if saveData(waitForCompletion: true) {
+            for item in dropped { deleteBackingFiles(for: item) }
+        }
+        clearPreviewIfMissing()
     }
 
     func resetIgnoredApps() {
@@ -496,15 +524,17 @@ class GlintMonitor: ObservableObject {
         if newItem == nil, let img = NSImage(pasteboard: pb) {
             var imgName: String? = nil
             var origName: String? = nil
+            var hash: String? = nil
             if let saved = saveThumbnail(img) {
                 imgName = saved.thumb
                 origName = saved.original
+                hash = saved.hash
             }
             newItem = ClipboardItem(
                 text: "Image (\(Int(img.size.width))x\(Int(img.size.height)))", type: .image,
                 timestamp: Date(), sourceApp: frontApp?.localizedName,
                 bundleID: frontApp?.bundleIdentifier, isPinned: false, fileURLs: nil,
-                imageFileName: imgName, originalImageName: origName)
+                imageFileName: imgName, originalImageName: origName, contentHash: hash)
         }
 
         if newItem == nil, let str = pb.string(forType: .string) {
@@ -525,112 +555,233 @@ class GlintMonitor: ObservableObject {
                 guard let self = self else { return }
                 self.hapticFeedback()
 
+                var replacedItem: ClipboardItem?
                 withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
-                    // Smart De-duplication
                     let existingIdx = self.items.firstIndex { existing in
-                        if existing.type != item.type { return false }
-                        if item.type == .file {
-                            return existing.fileURLs == item.fileURLs
-                        } else {
-                            return existing.text == item.text
-                        }
+                        GlintMonitor.isDuplicate(existing, of: item)
                     }
 
                     var wasPinned = false
                     if let idx = existingIdx {
-                        wasPinned = self.items[idx].isPinned
-                        // If the dupe had backing files that the new item doesn't reuse, clean them.
                         let old = self.items[idx]
-                        if old.imageFileName != item.imageFileName
-                            || old.originalImageName != item.originalImageName
-                        {
-                            self.deleteBackingFiles(for: old)
-                        }
+                        wasPinned = old.isPinned
+                        replacedItem = old
                         self.items.remove(at: idx)
                     }
 
                     var finalItem = item
                     finalItem.isPinned = wasPinned
-
                     self.items.insert(finalItem, at: 0)
                     self.sortItems()
 
-                    self.enforceLimit()
+                    // Keep an open preview pointed at the freshly deduped item.
+                    if let old = replacedItem, self.selectedPreviewID == old.id {
+                        self.selectedPreviewID = finalItem.id
+                    }
                 }
-                self.saveData()
+
+                // Commit the new item (and removal of the dupe) before deleting the
+                // replaced files, so history can never reference deleted images.
+                if self.saveData(waitForCompletion: true), let old = replacedItem {
+                    self.deleteBackingFiles(for: old)
+                }
+                self.enforceLimit()
             }
+        }
+    }
+
+    /// Dedupe rule: files by URL, images by content hash (falling back to the
+    /// dimension label for legacy items written before hashes existed), text by body.
+    private static func isDuplicate(_ existing: ClipboardItem, of new: ClipboardItem) -> Bool {
+        guard existing.type == new.type else { return false }
+        switch new.type {
+        case .file:
+            return existing.fileURLs == new.fileURLs
+        case .image:
+            // If the new capture couldn't be persisted, never replace an existing
+            // image that still has its preview.
+            guard new.imageFileName != nil else { return false }
+            if let a = existing.contentHash, let b = new.contentHash { return a == b }
+            return existing.text == new.text
+        case .text, .url:
+            return existing.text == new.text
         }
     }
 
     /// Thread-safe thumbnail generation (CoreGraphics/ImageIO only, no lockFocus).
-    private func saveThumbnail(_ image: NSImage) -> (thumb: String, original: String)? {
+    /// All cache I/O runs on `cacheQueue`, so a prune scheduled afterwards can
+    /// never overtake these writes.
+    private func saveThumbnail(_ image: NSImage) -> (thumb: String, original: String, hash: String)? {
         guard let cg = cgImage(from: image) else { return nil }
-        let originalName = "\(UUID().uuidString)_orig.png"
-        let thumbName = "\(UUID().uuidString)_thumb.png"
 
-        let originalUrl = cacheFolder.appendingPathComponent(originalName)
-        let thumbUrl = cacheFolder.appendingPathComponent(thumbName)
+        return cacheQueue.sync { () -> (thumb: String, original: String, hash: String)? in
+            let originalName = "\(UUID().uuidString)_orig.png"
+            let thumbName = "\(UUID().uuidString)_thumb.png"
+            let originalUrl = self.cacheFolder.appendingPathComponent(originalName)
+            let thumbUrl = self.cacheFolder.appendingPathComponent(thumbName)
 
-        guard let originalPNG = pngData(from: cg) else { return nil }
-        do {
-            try originalPNG.write(to: originalUrl, options: .atomic)
-        } catch {
-            return nil
-        }
-
-        let thumbCG = scaledThumbnailCG(from: cg, maxWidth: thumbnailMaxPixelWidth) ?? cg
-        guard let thumbPNG = pngData(from: thumbCG) else {
-            try? FileManager.default.removeItem(at: originalUrl)
-            return nil
-        }
-        do {
-            try thumbPNG.write(to: thumbUrl, options: .atomic)
-        } catch {
-            try? FileManager.default.removeItem(at: originalUrl)
-            return nil
-        }
-        return (thumb: thumbName, original: originalName)
-    }
-
-    func deleteBackingFiles(for item: ClipboardItem) {
-        SharedCaches.thumbnails.removeObject(forKey: (item.imageFileName ?? "") as NSString)
-        SharedCaches.thumbnails.removeObject(forKey: (item.originalImageName ?? "") as NSString)
-        if let f = item.imageFileName {
-            try? FileManager.default.removeItem(at: cacheFolder.appendingPathComponent(f))
-            try? FileManager.default.removeItem(at: legacyCacheFolder.appendingPathComponent(f))
-        }
-        if let f = item.originalImageName {
-            try? FileManager.default.removeItem(at: cacheFolder.appendingPathComponent(f))
-            try? FileManager.default.removeItem(at: legacyCacheFolder.appendingPathComponent(f))
-        }
-    }
-
-    /// Remove cached PNGs with no referencing item (fixes historical disk leak).
-    func pruneOrphanFiles() {
-        saveQueue.async { [weak self] in
-            guard let self = self else { return }
-            let referenced: Set<String> = Set(
-                self.items.flatMap { [$0.imageFileName, $0.originalImageName].compactMap { $0 } })
-            guard
-                let files = try? FileManager.default.contentsOfDirectory(atPath: self.cacheFolder
-                    .path)
-            else { return }
-            for file in files where (file.hasSuffix("_thumb.png") || file.hasSuffix("_orig.png"))
-                && !referenced.contains(file)
-            {
-                try? FileManager.default.removeItem(
-                    at: self.cacheFolder.appendingPathComponent(file))
+            guard let originalPNG = pngData(from: cg) else { return nil }
+            do {
+                try originalPNG.write(to: originalUrl, options: .atomic)
+            } catch {
+                NSLog("Glint: failed to write image original — \(error.localizedDescription)")
+                return nil
             }
+
+            let thumbCG = scaledThumbnailCG(from: cg, maxPixels: thumbnailMaxPixels) ?? cg
+            guard let thumbPNG = pngData(from: thumbCG) else {
+                try? FileManager.default.removeItem(at: originalUrl)
+                return nil
+            }
+            do {
+                try thumbPNG.write(to: thumbUrl, options: .atomic)
+            } catch {
+                NSLog("Glint: failed to write image thumbnail — \(error.localizedDescription)")
+                try? FileManager.default.removeItem(at: originalUrl)
+                return nil
+            }
+            return (thumb: thumbName, original: originalName, hash: sha256Hex(originalPNG))
+        }
+    }
+
+    /// Removes an item's backing files. The file work is queued behind any in-flight
+    /// capture writes; callers must persist history first so a crash can't leave
+    /// dangling references.
+    func deleteBackingFiles(for item: ClipboardItem) {
+        let names = [item.imageFileName, item.originalImageName].compactMap { $0 }
+        guard !names.isEmpty else { return }
+        for name in names {
+            SharedCaches.thumbnails.removeObject(forKey: name as NSString)
+        }
+        cacheQueue.async { [weak self] in
+            guard let self = self else { return }
+            let fm = FileManager.default
+            for name in names {
+                try? fm.removeItem(at: self.cacheFolder.appendingPathComponent(name))
+                try? fm.removeItem(at: self.legacyCacheFolder.appendingPathComponent(name))
+            }
+        }
+    }
+
+    /// Remove cached PNGs with no referencing item.
+    ///
+    /// The referenced set is snapshotted **on main**; the file pass runs on
+    /// `cacheQueue` and never reads `items`. Files younger than `pruneMinimumAge`
+    /// are skipped so a capture being written right now can't be treated as an
+    /// orphan.
+    func pruneOrphanFiles() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in self?.pruneOrphanFiles() }
+            return
+        }
+        let referenced = Set(
+            items.flatMap { [$0.imageFileName, $0.originalImageName].compactMap { $0 } })
+        let freshCutoff = Date().addingTimeInterval(-pruneMinimumAge)
+        cacheQueue.async { [weak self] in
+            guard let self = self else { return }
+            let fm = FileManager.default
+            for folder in [self.cacheFolder, self.legacyCacheFolder] {
+                guard
+                    let files = try? fm.contentsOfDirectory(
+                        at: folder, includingPropertiesForKeys: [.contentModificationDateKey])
+                else { continue }
+                for url in files {
+                    let name = url.lastPathComponent
+                    guard name.hasSuffix("_thumb.png") || name.hasSuffix("_orig.png") else {
+                        continue
+                    }
+                    guard !referenced.contains(name) else { continue }
+                    let modified =
+                        (try? url.resourceValues(forKeys: [.contentModificationDateKey])
+                            .contentModificationDate) ?? .distantPast
+                    guard modified < freshCutoff else { continue }
+                    try? fm.removeItem(at: url)
+                    SharedCaches.thumbnails.removeObject(forKey: name as NSString)
+                }
+            }
+        }
+    }
+
+    /// Rebuild a missing thumbnail when its original image is still on disk.
+    func repairThumbnails() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in self?.repairThumbnails() }
+            return
+        }
+        let pairs: [(thumb: String, original: String)] = items.compactMap { item in
+            guard let thumb = item.imageFileName, let original = item.originalImageName else {
+                return nil
+            }
+            return (thumb: thumb, original: original)
+        }
+        guard !pairs.isEmpty else { return }
+        cacheQueue.async { [weak self] in
+            guard let self = self else { return }
+            let fm = FileManager.default
+            for pair in pairs {
+                let thumbURL = self.cacheFolder.appendingPathComponent(pair.thumb)
+                guard !fm.fileExists(atPath: thumbURL.path) else { continue }
+                let originalURL = self.cacheFolder.appendingPathComponent(pair.original)
+                guard fm.fileExists(atPath: originalURL.path),
+                    let image = NSImage(contentsOf: originalURL),
+                    let cg = cgImage(from: image),
+                    let thumbCG = scaledThumbnailCG(from: cg, maxPixels: thumbnailMaxPixels),
+                    let png = pngData(from: thumbCG)
+                else { continue }
+                do {
+                    try png.write(to: thumbURL, options: .atomic)
+                    SharedCaches.thumbnails.removeObject(forKey: pair.thumb as NSString)
+                } catch {
+                    NSLog("Glint: failed to repair thumbnail — \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
+    /// Diagnostics only: log how many referenced images have no file on disk.
+    /// Never deletes anything.
+    func verifyReferencedFiles() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in self?.verifyReferencedFiles() }
+            return
+        }
+        let names = Set(
+            items.flatMap { [$0.imageFileName, $0.originalImageName].compactMap { $0 } })
+        guard !names.isEmpty else { return }
+        cacheQueue.async { [weak self] in
+            guard let self = self else { return }
+            let fm = FileManager.default
+            var missing = 0
+            for name in names {
+                let inCache = fm.fileExists(
+                    atPath: self.cacheFolder.appendingPathComponent(name).path)
+                let inLegacy = fm.fileExists(
+                    atPath: self.legacyCacheFolder.appendingPathComponent(name).path)
+                if !inCache && !inLegacy { missing += 1 }
+            }
+            if missing > 0 {
+                NSLog(
+                    "Glint: \(missing) referenced image file(s) are missing from the cache (history kept)"
+                )
+            }
+        }
+    }
+
+    private func clearPreviewIfMissing() {
+        guard let id = selectedPreviewID else { return }
+        if !items.contains(where: { $0.id == id }) {
+            selectedPreviewID = nil
         }
     }
 
     func clearHistory() {
         hapticFeedback()
-        let removed: [ClipboardItem]
-        removed = items.filter { !$0.isPinned }
+        let removed = items.filter { !$0.isPinned }
         withAnimation { self.items.removeAll { !$0.isPinned } }
-        for item in removed { deleteBackingFiles(for: item) }
-        saveData()
+        if saveData(waitForCompletion: true) {
+            for item in removed { deleteBackingFiles(for: item) }
+        }
+        clearPreviewIfMissing()
     }
 
     func deleteItem(_ item: ClipboardItem) {
@@ -639,8 +790,10 @@ class GlintMonitor: ObservableObject {
             _ = withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
                 items.remove(at: idx)
             }
-            deleteBackingFiles(for: item)
-            saveData()
+            if saveData(waitForCompletion: true) {
+                deleteBackingFiles(for: item)
+            }
+            clearPreviewIfMissing()
         }
     }
 
@@ -724,46 +877,66 @@ class GlintMonitor: ObservableObject {
         }
     }
 
-    func saveData() {
+    /// Persists history. `waitForCompletion` is used before deleting backing files so
+    /// a crash (or a failed write) can never leave a reference to a missing image.
+    /// Returns `false` only for a synchronous write that failed.
+    @discardableResult
+    func saveData(waitForCompletion: Bool = false) -> Bool {
         let itemsToSave = self.items
         let ignoredToSave = self.ignoredApps
         let url = self.storeURL
-        saveQueue.async {
-            if let data = try? JSONEncoder().encode(itemsToSave) {
-                try? data.write(to: url, options: .atomic)
+        let write: () -> Bool = {
+            var ok = true
+            do {
+                let data = try JSONEncoder().encode(itemsToSave)
+                try data.write(to: url, options: .atomic)
+            } catch {
+                NSLog("Glint: failed to save history — \(error.localizedDescription)")
+                ok = false
             }
             UserDefaults.standard.set(ignoredToSave, forKey: "ignoredApps")
+            return ok
         }
+        if waitForCompletion {
+            if Thread.isMainThread {
+                return saveQueue.sync(execute: write)
+            }
+            return write()
+        }
+        saveQueue.async { _ = write() }
+        return true
     }
 
+    /// Flush pending writes and persist the current history synchronously (app exit).
+    func flushHistory() {
+        saveData(waitForCompletion: true)
+    }
+
+    /// Must be called on main (from `init`). Assigns synchronously so callers can rely
+    /// on `items` being populated before any pruning/repair work is scheduled.
     func loadData() {
+        assert(Thread.isMainThread, "loadData must run on the main thread")
         // Prefer file store; one-time migrate legacy UserDefaults blob.
         if let data = try? Data(contentsOf: storeURL),
             let decoded = try? JSONDecoder().decode([ClipboardItem].self, from: data)
         {
-            let items = decoded
-            DispatchQueue.main.async {
-                self.items = items
-                self.sortItems()
-            }
+            items = decoded
+            sortItems()
         } else if let data = UserDefaults.standard.data(forKey: "savedGlintItems"),
             let decoded = try? JSONDecoder().decode([ClipboardItem].self, from: data)
         {
-            let items = decoded
-            DispatchQueue.main.async {
-                self.items = items
-                self.sortItems()
-            }
+            items = decoded
+            sortItems()
             // Migrate to file, drop legacy key.
             saveQueue.async { [storeURL] in
-                if let fresh = try? JSONEncoder().encode(items) {
+                if let fresh = try? JSONEncoder().encode(decoded) {
                     try? fresh.write(to: storeURL, options: .atomic)
                 }
                 UserDefaults.standard.removeObject(forKey: "savedGlintItems")
             }
         }
         if let savedIgnored = UserDefaults.standard.stringArray(forKey: "ignoredApps") {
-            DispatchQueue.main.async { self.ignoredApps = savedIgnored }
+            ignoredApps = savedIgnored
         }
     }
 }
@@ -1036,6 +1209,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 preview.orderOut(nil)
                 preview.alphaValue = 1
             })
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        // Flush history synchronously; a queued async write may never run.
+        GlintMonitor.shared.flushHistory()
     }
 
     func showHUD(message: String) {
