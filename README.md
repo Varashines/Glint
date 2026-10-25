@@ -44,7 +44,7 @@ Glint is engineered with a "security-by-design" approach to protect your sensiti
 
 ### Prerequisites
 - macOS 14.0 or later
-- Xcode 15.0+ / Swift 5.9+
+- Xcode 15.0+ / Swift 5.9+ (SwiftUI and the app icon catalog require Xcode, not just the Command Line Tools)
 - [dmgbuild](https://github.com/dmgbuild/dmgbuild) (optional, for local DMG packaging)
 
 ### Building Locally
@@ -56,10 +56,26 @@ cd Glint
 swift build
 ```
 
+> **No Xcode?** Use the GitHub Actions build instead — it runs on a macOS runner with Xcode and produces a ready-to-install DMG.
+
 ### Running the App
 ```bash
 swift run
 ```
+
+---
+
+## 📥 Install
+
+Download `Glint.dmg` from the [latest release](https://github.com/Varashines/Glint/releases/latest), open it, and drag **Glint** into **Applications**.
+
+The DMG is ad-hoc signed rather than notarized, so macOS may warn on first launch. Right-click the app → **Open**, or clear the quarantine flag:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/Glint.app
+```
+
+Requires macOS 14.0 or later.
 
 ---
 
@@ -73,6 +89,12 @@ Official releases are triggered via Git tags:
 2. Push the tag: `git push origin v1.x.x`
 
 The CI pipeline automatically generates a Universal Binary, builds the icon set, and packages a notarizable DMG.
+
+### Manual DMG build (no Xcode needed)
+Open **Actions → Build and Release DMG → Run workflow**, enter a version, and set `publish`:
+
+- `publish: false` — builds the DMG and uploads it as a downloadable run artifact (no release created).
+- `publish: true` — builds the DMG and publishes a GitHub release, creating the `v<version>` tag if needed.
 
 ### Manual DMG Creation
 To generate a professional DMG locally:
