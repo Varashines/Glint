@@ -788,10 +788,6 @@ class GlintPanel: NSPanel {
     }
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
-
-    /// Let the very first click act on a control even when Glint was summoned while
-    /// another app was active (without this, that click only activates the panel).
-    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
 // MARK: - Attached Preview Panel
@@ -821,10 +817,6 @@ class GlintPreviewPanel: NSPanel {
     // Key-able (like the main panel) so ⌘C on selected preview text works.
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
-
-    /// Let the very first click act on a control even when Glint was summoned while
-    /// another app was active (without this, that click only activates the panel).
-    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
 /// Return keyboard focus to the main list window (no-op if it isn't visible).
@@ -832,6 +824,12 @@ func focusGlintMain() {
     if let main = NSApp.windows.first(where: { $0 is GlintPanel }), main.isVisible {
         main.makeKeyAndOrderFront(nil)
     }
+}
+
+/// Hosting view that accepts the first click after the panel is summoned, so a
+/// click on a filter/button acts immediately instead of only activating the app.
+final class GlintHostingView<Content: View>: NSHostingView<Content> {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
 // MARK: - Floating HUD for Notifications
@@ -912,12 +910,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             window?.center()
             didInitialPosition = true
         }
-        window?.contentView = NSHostingView(
+        window?.contentView = GlintHostingView(
             rootView: ContentView().environmentObject(GlintMonitor.shared))
 
         // Attached preview panel: docked beside main, follows it as a child window.
         previewWindow = GlintPreviewPanel()
-        previewWindow?.contentView = NSHostingView(
+        previewWindow?.contentView = GlintHostingView(
             rootView: ContentView.PreviewHostView().environmentObject(GlintMonitor.shared))
         if let main = window, let preview = previewWindow {
             main.addChildWindow(preview, ordered: .above)

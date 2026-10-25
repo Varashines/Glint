@@ -584,7 +584,7 @@ struct ContentView: View {
 
                 ForEach(selectedApps.sorted(), id: \.self) { appName in
                     Button {
-                        withAnimation(.easeOut(duration: 0.15)) { selectedApps.remove(appName) }
+                        withAnimation(.easeOut(duration: 0.15)) { _ = selectedApps.remove(appName) }
                     } label: {
                         HStack(spacing: 4) {
                             if let icon = appIcon(for: appName) {
@@ -758,9 +758,9 @@ struct ContentView: View {
         return Button {
             withAnimation(.easeOut(duration: 0.15)) {
                 if isSelected {
-                    selectedApps.remove(appName)
+                    _ = selectedApps.remove(appName)
                 } else {
-                    selectedApps.insert(appName)
+                    _ = selectedApps.insert(appName)
                 }
             }
         } label: {
